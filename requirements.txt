@@ -7,3 +7,4 @@ lunar_python>=1.4
 av
 google-genai>=1.0
 fpdf2>=2.8
+pandas

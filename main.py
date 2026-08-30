@@ -2,15 +2,15 @@
 """FaceKorea 사주관상 — 웹캠 얼굴 트래킹 + 관상 분석 + 사주팔자 계산 (Streamlit)
 
 네 가지 기능을 탭으로 제공:
-  1. "실시간 얼굴 트래킹" — streamlit-webrtc로 브라우저 웹캠 영상을 받아
-     mediapipe Face Landmarker로 매 프레임 얼굴 랜드마크를 그려준다.
-  2. "관상 분석" — 카메라로 사진 한 장을 찍으면 랜드마크 비율 + 삼정/오악/
-     십이궁 전통 이론으로 관상 풀이를 보여주고, Gemini에 사진을 직접 보내
-     AI 맞춤 해설도 받을 수 있다.
-  3. "사주 계산" — 생년월일시(양력/음력)를 입력하면 사주팔자(년/월/일/시주),
+  1. "관상 분석" — 실시간 웹캠 트래킹 화면에서 무표정·미소 등 여러 표정을
+     순서대로 촬영하면, 랜드마크 비율 분석 + 삼정/오악/십이궁 전통 이론으로
+     관상 풀이를 보여주고, Gemini에 여러 표정 사진을 함께 보내 AI 맞춤
+     해설(기색 변화 포함)도 받을 수 있다.
+  2. "사주 계산" — 생년월일시(양력/음력)를 입력하면 사주팔자(년/월/일/시주),
      십성·십이운성·지장간·납음오행·공망까지 계산하고, Gemini로 AI 맞춤
      해설을 받을 수 있다.
-  4. "PDF 리포트" — 위 결과를 하나의 PDF 문서로 다운로드한다.
+  3. "PDF 리포트" — 위 결과를 하나의 PDF 문서로 다운로드한다.
+  4. "관리자" — 사주학·관상학 지식 데이터베이스(CSV/PDF)를 확인하는 비공개 페이지.
 
 ⚠️ 관상/사주 결과는 모두 재미로 즐기는 콘텐츠이며 과학적·통계적 근거가 없다.
    Gemini API 키는 사용자가 화면에서 직접 입력하며, 이 세션에서만 사용되고
@@ -26,8 +26,10 @@ import numpy as np
 import streamlit as st
 from streamlit_webrtc import RTCConfiguration, VideoProcessorBase, webrtc_streamer
 
+import admin
 import gemini_client
 import gwansang
+import knowledge_db as kdb
 import pdf_report
 import saju
 
@@ -52,6 +54,8 @@ st.markdown(
             padding:16px 18px;margin-top:10px;}
     .consent{font-size:.78rem;color:#b8a8d8;background:#191327;border:1px dashed #4a3a70;
               border-radius:8px;padding:8px 12px;margin:8px 0;}
+    .expr-badge{display:inline-block;background:#3a2f57;color:#f3d9ff;border-radius:999px;
+                padding:3px 12px;font-size:.75rem;margin:2px;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -85,8 +89,14 @@ RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-tab_track, tab_gwansang, tab_saju, tab_pdf = st.tabs(
-    ["🎥 실시간 얼굴 트래킹", "🧑 관상 분석", "📅 사주 계산", "📄 PDF 리포트"]
+EXPRESSIONS = [
+    ("무표정", "편안한 표정으로 정면을 바라봐주세요."),
+    ("미소", "활짝 웃는 표정을 지어주세요."),
+    ("눈 크게 뜨기", "눈을 크게 뜨고 정면을 바라봐주세요."),
+]
+
+tab_gwansang, tab_saju, tab_pdf, tab_admin = st.tabs(
+    ["🧑 관상 분석 (실시간 카메라)", "📅 사주 계산", "📄 PDF 리포트", "🔒 관리자"]
 )
 
 
@@ -107,39 +117,40 @@ def draw_landmarks(img_bgr: np.ndarray, pts: np.ndarray) -> np.ndarray:
     return img_bgr
 
 
-# ---------------------------------------------------------------- 탭 1: 실시간 트래킹
-with tab_track:
-    st.caption("브라우저가 웹캠 접근을 물어보면 허용해주세요. 얼굴에 초록/노랑 선으로 랜드마크가 그려집니다.")
+class FaceTrackProcessor(VideoProcessorBase):
+    """랜드마크를 그려서 보여주는 동시에, 가장 최근 프레임을 저장해뒀다가
+    '표정 캡처' 버튼을 누르면 그 프레임을 그대로 가져다 쓸 수 있게 한다."""
 
-    class FaceTrackProcessor(VideoProcessorBase):
-        def __init__(self) -> None:
-            self._start = time.time()
+    def __init__(self) -> None:
+        self._start = time.time()
+        self.last_frame = None  # BGR numpy array, 랜드마크 오버레이 없는 원본
 
-        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-            img = frame.to_ndarray(format="bgr24")
-            try:
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                ts_ms = int((time.time() - self._start) * 1000)
-                pts = gwansang.detect_landmarks_video(img_rgb, max(ts_ms, 0))
-                if pts is not None:
-                    img = draw_landmarks(img, pts)
-                else:
-                    cv2.putText(img, "얼굴을 인식하지 못했습니다", (14, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-            except Exception:
-                pass
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        self.last_frame = img.copy()
+        display = img
+        try:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            ts_ms = int((time.time() - self._start) * 1000)
+            pts = gwansang.detect_landmarks_video(img_rgb, max(ts_ms, 0))
+            if pts is not None:
+                display = draw_landmarks(img.copy(), pts)
+            else:
+                display = img.copy()
+                cv2.putText(display, "얼굴을 인식하지 못했습니다", (14, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        except Exception:
+            pass
+        return av.VideoFrame.from_ndarray(display, format="bgr24")
 
-    webrtc_streamer(
-        key="face-tracking",
-        video_processor_factory=FaceTrackProcessor,
-        rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": True, "audio": False},
-    )
 
-# ---------------------------------------------------------------- 탭 2: 관상 분석
+# ---------------------------------------------------------------- 탭 1: 관상 분석(실시간)
 with tab_gwansang:
-    st.caption("정면을 보고 사진을 한 장 찍으면, 얼굴 비율을 분석해서 관상 풀이를 보여줘요.")
+    st.caption(
+        "브라우저가 웹캠 접근을 물어보면 허용해주세요. 화면에 얼굴 랜드마크가 실시간으로 "
+        "그려지고, 안내에 따라 표정을 바꿔가며 여러 장을 촬영하면 더 풍부한 관상 해설을 "
+        "받을 수 있어요."
+    )
 
     with st.expander("📖 전통 관상학 참고자료 — 삼정·오악·십이궁"):
         st.markdown("**삼정(三停)** — 얼굴을 상/중/하로 나눠 인생 시기를 보는 구획")
@@ -152,29 +163,70 @@ with tab_gwansang:
         for name, region, desc in gwansang.SIBIGUNG:
             st.markdown(f"- **{name}** ({region}): {desc}")
 
-    photo = st.camera_input("정면 사진 촬영", key="gwansang_camera")
+    ctx = webrtc_streamer(
+        key="face-tracking",
+        video_processor_factory=FaceTrackProcessor,
+        rtc_configuration=RTC_CONFIGURATION,
+        media_stream_constraints={"video": True, "audio": False},
+    )
 
-    if photo is not None:
-        file_bytes = np.frombuffer(photo.getvalue(), dtype=np.uint8)
+    captures = st.session_state.setdefault("expr_captures", {})
+    step = st.session_state.get("expr_step", 0)
+
+    badges = " ".join(
+        f'<span class="expr-badge">{"✅" if label in captures else "⬜"} {label}</span>'
+        for label, _ in EXPRESSIONS
+    )
+    st.markdown(badges, unsafe_allow_html=True)
+
+    if ctx.state.playing:
+        if step < len(EXPRESSIONS):
+            label, instruction = EXPRESSIONS[step]
+            st.info(f"📸 {step + 1}/{len(EXPRESSIONS)} — **{label}**: {instruction}")
+            if st.button(f"'{label}' 표정 지금 캡처하기", use_container_width=True, key=f"capture_{step}"):
+                frame = ctx.video_processor.last_frame if ctx.video_processor else None
+                if frame is None:
+                    st.warning("아직 카메라 프레임을 받지 못했어요. 잠시 후 다시 시도해주세요.")
+                else:
+                    ok, jpg = cv2.imencode(".jpg", frame)
+                    if ok:
+                        captures[label] = jpg.tobytes()
+                        st.session_state["expr_step"] = step + 1
+                        st.session_state.pop("gwansang_ai_text", None)
+                        st.rerun()
+        else:
+            st.success("표정 촬영을 모두 마쳤어요! 아래에서 결과를 확인하세요.")
+    else:
+        st.caption("⬆️ 위 START 버튼을 눌러 카메라를 켜주세요.")
+
+    if captures:
+        cols = st.columns(len(captures))
+        for col, (label, jpg_bytes) in zip(cols, captures.items()):
+            with col:
+                st.image(jpg_bytes, caption=label, use_container_width=True)
+
+        if st.button("🔄 다시 촬영하기", key="expr_reset"):
+            st.session_state["expr_captures"] = {}
+            st.session_state["expr_step"] = 0
+            st.session_state.pop("gwansang_ai_text", None)
+            st.session_state.pop("gwansang_rule_result", None)
+            st.rerun()
+
+        # 측정 기반(무표정 우선) 분석
+        base_label = "무표정" if "무표정" in captures else next(iter(captures))
+        base_jpg = captures[base_label]
+        file_bytes = np.frombuffer(base_jpg, dtype=np.uint8)
         img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-        with st.spinner("얼굴을 분석하는 중..."):
-            pts = gwansang.detect_landmarks_image(img_rgb)
+        pts = gwansang.detect_landmarks_image(img_rgb)
 
         if pts is None:
-            st.warning("얼굴을 찾지 못했어요. 조명을 밝게 하고 정면으로 다시 찍어주세요.")
-            st.session_state.pop("gwansang_rule_result", None)
+            st.warning("촬영한 사진에서 얼굴을 찾지 못했어요. 다시 촬영해주세요.")
         else:
             annotated = draw_landmarks(img_bgr.copy(), pts)
-            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="인식된 얼굴 랜드마크")
+            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption=f"인식된 얼굴 랜드마크 ({base_label})")
 
             rule_result = gwansang.analyze(pts)
-            photo_id = hash(photo.getvalue())
-            if st.session_state.get("gwansang_photo_id") != photo_id:
-                st.session_state["gwansang_photo_id"] = photo_id
-                st.session_state.pop("gwansang_ai_text", None)
-
             st.session_state["gwansang_rule_result"] = rule_result
             ok, annotated_jpg = cv2.imencode(".jpg", annotated)
             st.session_state["gwansang_face_image"] = annotated_jpg.tobytes() if ok else None
@@ -187,9 +239,10 @@ with tab_gwansang:
                 )
 
             st.markdown("---")
+            n_photos = len(captures)
             st.markdown(
-                '<div class="consent">✨ 아래 버튼을 누르면 방금 촬영한 사진이 '
-                "Google Gemini API로 전송되어 더 상세한 맞춤 해설을 생성합니다.</div>",
+                f'<div class="consent">✨ 아래 버튼을 누르면 촬영한 사진 {n_photos}장이 모두 '
+                "Google Gemini API로 전송되어 표정 변화까지 반영한 맞춤 해설을 생성합니다.</div>",
                 unsafe_allow_html=True,
             )
             if st.button(
@@ -198,9 +251,12 @@ with tab_gwansang:
             ):
                 try:
                     with st.spinner("Gemini가 얼굴을 분석하고 있어요... (최대 30초 정도 걸려요)"):
-                        context = gwansang.analyze_to_prompt_dict(pts)
+                        measure_context = gwansang.analyze_to_prompt_dict(pts)
+                        db_context = kdb.find_gwansang_context(rule_result)
+                        images = list(captures.items())
                         ai_text = gemini_client.generate_gwansang_reading(
-                            api_key, photo.getvalue(), "image/jpeg", context=context,
+                            api_key, images, "image/jpeg",
+                            context=measure_context, db_context=db_context,
                         )
                     st.session_state["gwansang_ai_text"] = ai_text
                 except gemini_client.GeminiError as e:
@@ -213,7 +269,7 @@ with tab_gwansang:
                 st.markdown(f'<div class="ai-box">{st.session_state["gwansang_ai_text"]}</div>',
                             unsafe_allow_html=True)
 
-# ---------------------------------------------------------------- 탭 3: 사주 계산
+# ---------------------------------------------------------------- 탭 2: 사주 계산
 with tab_saju:
     st.caption("생년월일시를 입력하면 사주팔자와 십성·십이운성·지장간·납음오행까지 계산해줘요.")
 
@@ -319,7 +375,8 @@ with tab_saju:
             try:
                 with st.spinner("Gemini가 사주를 풀이하고 있어요... (최대 30초 정도 걸려요)"):
                     data = saju.saju_to_prompt_dict(result)
-                    ai_text = gemini_client.generate_saju_reading(api_key, data)
+                    db_context = kdb.find_saju_context(data)
+                    ai_text = gemini_client.generate_saju_reading(api_key, data, db_context=db_context)
                 st.session_state["saju_ai_text"] = ai_text
             except gemini_client.GeminiError as e:
                 st.error(str(e))
@@ -331,7 +388,7 @@ with tab_saju:
             st.markdown(f'<div class="ai-box">{st.session_state["saju_ai_text"]}</div>',
                         unsafe_allow_html=True)
 
-# ---------------------------------------------------------------- 탭 4: PDF 리포트
+# ---------------------------------------------------------------- 탭 3: PDF 리포트
 with tab_pdf:
     st.caption("지금까지 계산·생성된 사주/관상 결과를 하나의 PDF 리포트로 묶어 다운로드해요.")
 
@@ -340,7 +397,7 @@ with tab_pdf:
 
     st.markdown(f"- 사주 계산 결과: {'✅ 있음' if saju_ready else '❌ 없음 (사주 계산 탭에서 먼저 계산하세요)'}")
     st.markdown(f"- 사주 AI 해설: {'✅ 있음' if st.session_state.get('saju_ai_text') else '➖ 없음'}")
-    st.markdown(f"- 관상 분석 결과: {'✅ 있음' if gwansang_ready else '❌ 없음 (관상 분석 탭에서 먼저 사진을 찍으세요)'}")
+    st.markdown(f"- 관상 분석 결과: {'✅ 있음' if gwansang_ready else '❌ 없음 (관상 분석 탭에서 먼저 표정을 촬영하세요)'}")
     st.markdown(f"- 관상 AI 해설: {'✅ 있음' if st.session_state.get('gwansang_ai_text') else '➖ 없음'}")
 
     if not saju_ready and not gwansang_ready:
@@ -365,3 +422,7 @@ with tab_pdf:
                 file_name="facekorea_사주관상_리포트.pdf", mime="application/pdf",
                 use_container_width=True,
             )
+
+# ---------------------------------------------------------------- 탭 4: 관리자
+with tab_admin:
+    admin.render()
