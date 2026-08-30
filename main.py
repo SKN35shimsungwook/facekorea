@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """FaceKorea 사주관상 — 웹캠 얼굴 트래킹 + 관상 분석 + 사주팔자 계산 (Streamlit)
 
-네 가지 기능을 탭으로 제공:
-  1. "관상 분석" — 실시간 웹캠 트래킹 화면에서 무표정·미소 등 여러 표정을
-     순서대로 촬영하면, 랜드마크 비율 분석 + 삼정/오악/십이궁 전통 이론으로
-     관상 풀이를 보여주고, Gemini에 여러 표정 사진을 함께 보내 AI 맞춤
-     해설(기색 변화 포함)도 받을 수 있다.
+다섯 가지 기능을 탭으로 제공:
+  1. "관상 분석" — 실시간 웹캠 트래킹 화면에서 무표정·미소·놀람·화남·슬픔 등
+     여러 표정을 순서대로 촬영하면, 랜드마크 비율 분석 + 삼정/오악/십이궁
+     전통 이론으로 관상 풀이를 보여주고, Gemini에 여러 표정 사진을 함께 보내
+     AI 맞춤 해설(기색 변화 포함)도 받을 수 있다.
   2. "사주 계산" — 생년월일시(양력/음력)를 입력하면 사주팔자(년/월/일/시주),
-     십성·십이운성·지장간·납음오행·공망까지 계산하고, Gemini로 AI 맞춤
-     해설을 받을 수 있다.
-  3. "PDF 리포트" — 위 결과를 하나의 PDF 문서로 다운로드한다.
-  4. "관리자" — 사주학·관상학 지식 데이터베이스(CSV/PDF)를 확인하는 비공개 페이지.
+     십성·십이운성·지장간·납음오행·공망까지 계산하고, 성별을 입력하면 대운(大運)
+     흐름과 오행 변화 그래프도 볼 수 있다. Gemini로 AI 맞춤 해설도 받을 수 있다.
+  3. "종합 컨설팅" — 사주·관상 AI 해설을 종합해 대화형으로 컨설팅을 진행한다.
+  4. "PDF 리포트" — 위 결과를 하나의 PDF 문서로 다운로드한다.
+  5. "관리자" — 사주학·관상학 지식 데이터베이스(CSV/PDF)를 확인하는 비공개 페이지.
 
 ⚠️ 관상/사주 결과는 모두 재미로 즐기는 콘텐츠이며 과학적·통계적 근거가 없다.
    Gemini API 키는 사용자가 화면에서 직접 입력하며, 이 세션에서만 사용되고
@@ -106,8 +107,8 @@ EXPRESSIONS = [
     ("슬픔", "입꼬리를 내리며 슬픈 표정을 지어주세요."),
 ]
 
-tab_gwansang, tab_saju, tab_pdf, tab_admin = st.tabs(
-    ["🧑 관상 분석 (실시간 카메라)", "📅 사주 계산", "📄 PDF 리포트", "🔒 관리자"]
+tab_gwansang, tab_saju, tab_consulting, tab_pdf, tab_admin = st.tabs(
+    ["🧑 관상 분석 (실시간 카메라)", "📅 사주 계산", "🧭 종합 컨설팅", "📄 PDF 리포트", "🔒 관리자"]
 )
 
 
@@ -313,6 +314,10 @@ with tab_saju:
         birth_time = st.time_input(
             "태어난 시각", value=None, key="saju_time", disabled=time_unknown,
         )
+        gender_sel = st.selectbox(
+            "성별 (대운·인생 흐름 그래프를 보려면 선택)", ["선택 안 함", "남", "여"],
+            key="saju_gender",
+        )
 
     if st.button("사주 계산하기", type="primary", use_container_width=True):
         if date_error:
@@ -330,6 +335,7 @@ with tab_saju:
                     hour=hour, minute=minute,
                     is_lunar=(calendar_type == "음력"),
                     time_unknown=time_unknown,
+                    gender=(gender_sel if gender_sel in ("남", "여") else None),
                 )
             except Exception as e:
                 st.error(f"계산 중 오류가 발생했어요: {e}")
@@ -396,6 +402,43 @@ with tab_saju:
                     unsafe_allow_html=True,
                 )
 
+        if result.daeun:
+            st.markdown("#### 📈 대운(大運)으로 보는 인생 흐름")
+            st.caption("10년 단위로 바뀌는 큰 기운의 흐름이에요. 아래는 원국(타고난 8글자)에 각 대운 "
+                       "구간의 오행을 더했을 때 오행 균형이 어떻게 움직이는지 보여줘요.")
+            daeun_cols = st.columns(len(result.daeun))
+            for col, d in zip(daeun_cols, result.daeun):
+                with col:
+                    st.markdown(
+                        f"""
+                        <div class="pillar-card">
+                          <div class="hanja" style="font-size:1.3rem;">{d.ganzhi}</div>
+                          <div class="hangul">{d.hangul}</div>
+                          <div class="label">{d.start_age}~{d.end_age}세</div>
+                          <div class="label">{d.wuxing_hangul}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            try:
+                import pandas as pd
+                elem_cols = ["목(木)", "화(火)", "토(土)", "금(金)", "수(水)"]
+                rows = []
+                for d in result.daeun:
+                    counts = dict(result.wuxing_count)
+                    for ch in d.wuxing_hanja:
+                        counts[ch] = counts.get(ch, 0) + 1
+                    row = {"나이대": f"{d.start_age}~{d.end_age}세"}
+                    row.update({saju.WUXING_KR.get(k, k): v for k, v in counts.items()})
+                    rows.append(row)
+                df = pd.DataFrame(rows).set_index("나이대")
+                for c in elem_cols:
+                    if c not in df.columns:
+                        df[c] = 0
+                st.line_chart(df[elem_cols])
+            except Exception:
+                pass
+
         st.markdown("---")
         if st.button(
             "✨ Gemini로 AI 맞춤 사주 해설 받기", use_container_width=True,
@@ -417,7 +460,73 @@ with tab_saju:
             st.markdown(f'<div class="ai-box">{st.session_state["saju_ai_text"]}</div>',
                         unsafe_allow_html=True)
 
-# ---------------------------------------------------------------- 탭 3: PDF 리포트
+# ---------------------------------------------------------------- 탭 3: 종합 컨설팅
+with tab_consulting:
+    st.caption(
+        "사주·관상 AI 해설을 종합해서 컨설팅해줘요. 첫 답변 끝에 나오는 질문에 답하면 "
+        "더 맞춤화된 조언으로 이어집니다."
+    )
+
+    saju_ai = st.session_state.get("saju_ai_text")
+    gwansang_ai = st.session_state.get("gwansang_ai_text")
+
+    if not saju_ai and not gwansang_ai:
+        st.info(
+            "먼저 '사주 계산' 탭이나 '관상 분석' 탭에서 Gemini AI 맞춤 해설을 한 번 이상 "
+            "받아보세요. 그 결과를 바탕으로 종합 컨설팅을 시작할 수 있어요."
+        )
+    elif not api_key:
+        st.warning("⬆️ 상단의 'Gemini API 키 설정'에 키를 입력해주세요.")
+    else:
+        messages = st.session_state.setdefault("consulting_messages", [])
+
+        if not messages:
+            have = []
+            if saju_ai:
+                have.append("사주 해설")
+            if gwansang_ai:
+                have.append("관상 해설")
+            st.markdown(f"현재 반영 가능한 자료: **{' · '.join(have)}**")
+            if st.button("🧭 종합 컨설팅 시작하기", type="primary", use_container_width=True, key="consulting_start"):
+                intro_parts = ["아래는 이미 생성된 사주/관상 해설이야. 이를 바탕으로 컨설팅을 시작해줘."]
+                if saju_ai:
+                    intro_parts.append("## 사주 해설\n" + saju_ai)
+                if gwansang_ai:
+                    intro_parts.append("## 관상 해설\n" + gwansang_ai)
+                try:
+                    with st.spinner("Gemini가 사주와 관상을 종합하고 있어요... (최대 30초 정도 걸려요)"):
+                        history = [{"role": "user", "text": "\n\n".join(intro_parts)}]
+                        reply = gemini_client.generate_consulting_reply(api_key, history)
+                    history.append({"role": "model", "text": reply})
+                    st.session_state["consulting_messages"] = history
+                    st.rerun()
+                except gemini_client.GeminiError as e:
+                    st.error(str(e))
+        else:
+            for i, msg in enumerate(messages):
+                if i == 0:
+                    continue  # 첫 메시지(내부 종합 프롬프트)는 화면에 표시하지 않음
+                with st.chat_message("assistant" if msg["role"] == "model" else "user"):
+                    st.markdown(msg["text"])
+
+            user_input = st.chat_input("컨설턴트의 질문에 답하거나, 궁금한 점을 물어보세요")
+            if user_input:
+                messages.append({"role": "user", "text": user_input})
+                try:
+                    with st.spinner("Gemini가 답변을 준비하고 있어요..."):
+                        reply = gemini_client.generate_consulting_reply(api_key, messages)
+                    messages.append({"role": "model", "text": reply})
+                except gemini_client.GeminiError as e:
+                    st.error(str(e))
+                    messages.pop()
+                st.rerun()
+
+            st.markdown("---")
+            if st.button("🔄 컨설팅 새로 시작하기", key="consulting_reset"):
+                st.session_state["consulting_messages"] = []
+                st.rerun()
+
+# ---------------------------------------------------------------- 탭 4: PDF 리포트
 with tab_pdf:
     st.caption("지금까지 계산·생성된 사주/관상 결과를 하나의 PDF 리포트로 묶어 다운로드해요.")
 
@@ -452,6 +561,6 @@ with tab_pdf:
                 use_container_width=True,
             )
 
-# ---------------------------------------------------------------- 탭 4: 관리자
+# ---------------------------------------------------------------- 탭 5: 관리자
 with tab_admin:
     admin.render()
