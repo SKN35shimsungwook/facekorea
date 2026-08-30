@@ -70,7 +70,12 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------- Gemini API 키
-with st.expander("🔑 Gemini API 키 설정 (AI 맞춤 해설을 받으려면 입력하세요)"):
+_api_connected = bool(st.session_state.get("gemini_api_key", "").strip())
+_expander_label = (
+    "🔑 Gemini API 키 설정 — ✅ 연동 완료" if _api_connected
+    else "🔑 Gemini API 키 설정 (AI 맞춤 해설을 받으려면 입력하세요)"
+)
+with st.expander(_expander_label):
     st.caption(
         "[Google AI Studio](https://aistudio.google.com/apikey)에서 무료로 발급받을 수 있어요. "
         "이 키는 이 브라우저 세션에서만 메모리에 보관되고, 앱 서버 파일이나 깃허브에는 "
@@ -82,6 +87,10 @@ with st.expander("🔑 Gemini API 키 설정 (AI 맞춤 해설을 받으려면 �
         value=st.session_state.get("gemini_api_key", ""),
         key="gemini_api_key_input",
     )
+    if st.session_state["gemini_api_key"].strip():
+        st.success("✅ API 연동 완료 — AI 맞춤 해설 버튼을 쓸 수 있어요.")
+    else:
+        st.caption("🔌 아직 연동되지 않았어요. 키를 입력하면 자동으로 연동돼요.")
 
 api_key = st.session_state.get("gemini_api_key", "").strip()
 
@@ -92,7 +101,9 @@ RTC_CONFIGURATION = RTCConfiguration(
 EXPRESSIONS = [
     ("무표정", "편안한 표정으로 정면을 바라봐주세요."),
     ("미소", "활짝 웃는 표정을 지어주세요."),
-    ("눈 크게 뜨기", "눈을 크게 뜨고 정면을 바라봐주세요."),
+    ("놀람", "눈을 크게 뜨고 놀란 표정을 지어주세요."),
+    ("화남", "미간을 찌푸리며 화난 표정을 지어주세요."),
+    ("슬픔", "입꼬리를 내리며 슬픈 표정을 지어주세요."),
 ]
 
 tab_gwansang, tab_saju, tab_pdf, tab_admin = st.tabs(
@@ -275,11 +286,27 @@ with tab_saju:
 
     c1, c2 = st.columns(2)
     with c1:
-        birth_date = st.date_input(
-            "생년월일", value=None,
-            min_value=datetime.date(1950, 1, 1), max_value=datetime.date.today(),
-            key="saju_date", format="YYYY-MM-DD",
-        )
+        st.markdown("생년월일")
+        _this_year = datetime.date.today().year
+        ycol, mcol, dcol = st.columns(3)
+        with ycol:
+            year_sel = st.selectbox(
+                "년", ["선택"] + [str(y) for y in range(_this_year, 1949, -1)],
+                key="saju_year",
+            )
+        with mcol:
+            month_sel = st.selectbox("월", ["선택"] + [str(m) for m in range(1, 13)], key="saju_month")
+        with dcol:
+            day_sel = st.selectbox("일", ["선택"] + [str(d) for d in range(1, 32)], key="saju_day")
+
+        birth_date = None
+        date_error = False
+        if year_sel != "선택" and month_sel != "선택" and day_sel != "선택":
+            try:
+                birth_date = datetime.date(int(year_sel), int(month_sel), int(day_sel))
+            except ValueError:
+                date_error = True
+
         calendar_type = st.radio("달력 기준", ["양력", "음력"], horizontal=True, key="saju_cal")
     with c2:
         time_unknown = st.checkbox("태어난 시간 모름", key="saju_time_unknown")
@@ -288,8 +315,10 @@ with tab_saju:
         )
 
     if st.button("사주 계산하기", type="primary", use_container_width=True):
-        if birth_date is None:
-            st.warning("생년월일을 입력해주세요.")
+        if date_error:
+            st.warning("존재하지 않는 날짜예요. 월/일을 다시 확인해주세요.")
+        elif birth_date is None:
+            st.warning("생년월일을 년/월/일 모두 선택해주세요.")
         elif birth_time is None and not time_unknown:
             st.warning("태어난 시각을 입력하거나 '태어난 시간 모름'을 체크해주세요.")
         else:
