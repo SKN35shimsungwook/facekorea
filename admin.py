@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""관리자 전용 페이지 — 사주학·관상학 지식 DB를 조회하고 CSV/PDF로 내려받는다.
+"""관리자 페이지 — 사주학·관상학 지식 DB를 조회하고 CSV/PDF로 내려받는다.
 
-일반 사용자에게는 노출하지 않고, 비밀번호를 입력해야만 볼 수 있다. 비밀번호는
-st.secrets["ADMIN_PASSWORD"]에서 읽으며, 로컬 개발용 기본값을 함께 제공한다.
-배포 시에는 반드시 Streamlit Cloud의 Secrets 설정에서 이 값을 바꿔야 한다.
+비밀번호 없이 누구나 탭을 눌러 볼 수 있다(원래는 비밀번호로 막아뒀지만
+사용자 요청으로 제거함). 민감한 개인정보가 아니라 참고자료 원문이라 문제
+없다고 판단했다.
 """
 import datetime
 
@@ -13,48 +13,9 @@ import streamlit as st
 import knowledge_db as kdb
 import knowledge_pdf as kpdf
 
-DEFAULT_ADMIN_PASSWORD = "facekorea-admin"
-
-
-def _get_admin_password() -> str:
-    try:
-        return st.secrets.get("ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
-    except Exception:
-        return DEFAULT_ADMIN_PASSWORD
-
-
-def _login_form():
-    st.info(
-        "이 페이지는 사주학·관상학 지식 데이터베이스 원문을 확인하는 관리자 전용 "
-        "화면입니다. 일반 이용자에게는 공개하지 않습니다."
-    )
-    pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
-    if st.button("입장", key="admin_login_btn"):
-        if pw and pw == _get_admin_password():
-            st.session_state["admin_authed"] = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 올바르지 않습니다.")
-    if _get_admin_password() == DEFAULT_ADMIN_PASSWORD:
-        st.caption(
-            "⚠️ 기본 비밀번호(facekorea-admin)가 아직 설정되어 있어요. 배포 전 "
-            "`.streamlit/secrets.toml`(로컬) 또는 Streamlit Cloud의 Secrets에서 "
-            "ADMIN_PASSWORD 값을 바꿔주세요."
-        )
-
 
 def render():
-    if not st.session_state.get("admin_authed"):
-        _login_form()
-        return
-
-    top1, top2 = st.columns([4, 1])
-    with top1:
-        st.success("관리자 인증됨")
-    with top2:
-        if st.button("로그아웃", key="admin_logout_btn", use_container_width=True):
-            st.session_state["admin_authed"] = False
-            st.rerun()
+    st.caption("사주학·관상학 참고자료 데이터베이스를 확인하고 CSV/PDF로 내려받을 수 있어요.")
 
     saju_rows = kdb.load_saju_rows()
     gw_rows = kdb.load_gwansang_rows()
