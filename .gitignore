@@ -5,3 +5,4 @@ fonts/
 .venv/
 venv/
 *.pdf
+.streamlit/secrets.toml
