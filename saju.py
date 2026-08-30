@@ -20,6 +20,14 @@ ZHI_KR = {
 WUXING_KR = {"木": "목(木)", "火": "화(火)", "土": "토(土)", "金": "금(金)", "水": "수(水)"}
 # 오행 생(生) 순환: 목생화, 화생토, 토생금, 금생수, 수생목
 WUXING_GENERATES = {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}
+GAN_WUXING = {
+    "甲": "木", "乙": "木", "丙": "火", "丁": "火", "戊": "土",
+    "己": "土", "庚": "金", "辛": "金", "壬": "水", "癸": "水",
+}
+ZHI_WUXING = {
+    "子": "水", "丑": "土", "寅": "木", "卯": "木", "辰": "土", "巳": "火",
+    "午": "火", "未": "土", "申": "金", "酉": "金", "戌": "土", "亥": "水",
+}
 
 ZODIAC_KR = {
     "鼠": "쥐", "牛": "소", "虎": "호랑이", "兔": "토끼", "蛇": "뱀",
@@ -131,6 +139,22 @@ class Pillar:
 
 
 @dataclass
+class DaeunPeriod:
+    index: int
+    start_age: int
+    end_age: int
+    start_year: int
+    end_year: int
+    ganzhi: str      # 한자, 예: "壬辰"
+    hangul: str
+    wuxing_hanja: str  # 예: "水土"
+
+    @property
+    def wuxing_hangul(self) -> str:
+        return "".join(WUXING_KR.get(c, c) + " " for c in self.wuxing_hanja).strip()
+
+
+@dataclass
 class SajuResult:
     year: Pillar
     month: Pillar
@@ -142,6 +166,7 @@ class SajuResult:
     minggong: str = ""    # 명궁(命宮)
     shengong: str = ""    # 신궁(身宮)
     wuxing_count: dict = field(default_factory=dict)
+    daeun: list = field(default_factory=list)  # list[DaeunPeriod], 성별 입력 시에만 채워짐
 
     @property
     def pillars(self):
@@ -185,6 +210,31 @@ class SajuResult:
         return (label, same_side, other_side)
 
 
+def compute_daeun(ec, gender: str, count: int = 9) -> list:
+    """lunar_python의 EightChar로 대운(大運) 목록을 계산한다.
+
+    gender: "남" 또는 "여". 대운의 순행/역행은 년간의 음양과 성별로 정해지며
+    (양남음녀=순행, 음남양녀=역행), 정확한 대운수(시작 나이)는 생일부터
+    다음/이전 절입일까지의 실제 날짜 차이로 계산된다 — 이 부분은 lunar_python이
+    만세력 절기 데이터를 이용해 정확히 처리해준다.
+    """
+    yun = ec.getYun(1 if gender == "남" else 0)
+    periods = []
+    for dy in yun.getDaYun()[1 : count + 1]:
+        gz = dy.getGanZhi()
+        if not gz:
+            continue
+        wx = (GAN_WUXING.get(gz[0], ""), ZHI_WUXING.get(gz[1], ""))
+        periods.append(DaeunPeriod(
+            index=dy.getIndex(),
+            start_age=dy.getStartAge(), end_age=dy.getEndAge(),
+            start_year=dy.getStartYear(), end_year=dy.getEndYear(),
+            ganzhi=gz, hangul=hanja_to_kr(gz),
+            wuxing_hanja="".join(wx),
+        ))
+    return periods
+
+
 def compute_saju(
     year: int,
     month: int,
@@ -193,12 +243,14 @@ def compute_saju(
     minute: int = 0,
     is_lunar: bool = False,
     time_unknown: bool = False,
+    gender: str | None = None,
 ) -> SajuResult:
     """생년월일시로 사주팔자(십성·십이운성·지장간·납음·공망 포함)를 계산한다.
 
     time_unknown=True면 시주(時柱)는 계산하지 않는다(시간이 없으면 정확한
     시주를 알 수 없기 때문). 시 입력값은 일주 계산에 영향을 주지 않도록
-    정오(12:00)로 고정한다.
+    정오(12:00)로 고정한다. gender("남"/"여")를 주면 대운(大運) 목록도 함께
+    계산한다 — 대운의 순행/역행이 성별에 따라 갈리기 때문에 필요하다.
     """
     calc_hour = 12 if time_unknown else hour
     calc_minute = 0 if time_unknown else minute
@@ -267,6 +319,13 @@ def compute_saju(
 
     zodiac_kr = ZODIAC_KR.get(lunar.getYearShengXiao(), lunar.getYearShengXiao())
 
+    daeun = []
+    if gender in ("남", "여"):
+        try:
+            daeun = compute_daeun(ec, gender)
+        except Exception:
+            daeun = []
+
     return SajuResult(
         year=year_p,
         month=month_p,
@@ -278,6 +337,7 @@ def compute_saju(
         minggong=hanja_to_kr(ec.getMingGong()),
         shengong=hanja_to_kr(ec.getShenGong()),
         wuxing_count=wuxing_count,
+        daeun=daeun,
     )
 
 
@@ -297,7 +357,7 @@ def saju_to_prompt_dict(result: SajuResult) -> dict:
         }
 
     strength_label, same_n, other_n = result.body_strength()
-    return {
+    out = {
         "음력생일": result.lunar_date_str,
         "띠": result.zodiac_kr + "띠",
         "년주": pillar_dict(result.year),
@@ -310,3 +370,12 @@ def saju_to_prompt_dict(result: SajuResult) -> dict:
         "오행분포": {WUXING_KR.get(k, k): v for k, v in result.wuxing_count.items()},
         "신강신약_간이판정": f"{strength_label} (동조 {same_n} : 이조 {other_n})",
     }
+    if result.daeun:
+        out["대운"] = [
+            {
+                "나이": f"{d.start_age}~{d.end_age}세", "연도": f"{d.start_year}~{d.end_year}",
+                "간지": f"{d.ganzhi}({d.hangul})", "오행": d.wuxing_hangul,
+            }
+            for d in result.daeun
+        ]
+    return out
