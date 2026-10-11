@@ -1,5 +1,7 @@
 # 🔮 FaceKorea 사주관상
 
+**🔗 바로 실행해 보기:** https://ghamcvrvmmapp82suhsbvf5.streamlit.app
+
 웹캠으로 표정을 찍으면 **관상**을 봐주고, 생년월일시를 입력하면 **사주팔자**를 계산해주는
 Streamlit 웹앱이에요. AI(Gemini)가 그 결과를 바탕으로 맞춤 해설도 해줘요.
 
